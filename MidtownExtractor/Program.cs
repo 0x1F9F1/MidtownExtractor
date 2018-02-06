@@ -488,12 +488,10 @@ namespace MidtownExtractor
 
                                 Directory.CreateDirectory(Path.GetDirectoryName(outputName));
 
-                                #if false
                                 using (var output = File.OpenWrite(outputName))
                                 {
                                     output.Write(file_data, 0, file_data.Length);
                                 }
-                                #endif
                             }
                         });
                     }
