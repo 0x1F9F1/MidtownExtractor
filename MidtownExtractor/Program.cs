@@ -21,6 +21,95 @@ public static class StreamExtensions
         return builder.ToString();
     }
 
+    private static string DaveEncoding = "\0 #$()-./?0123456789_abcdefghijklmnopqrstuvwxyz~";
+
+    private static string ReadDaveStringImpl(this Stream stream, int bit_index)
+    {
+        var builder = new StringBuilder();
+
+        int bits = 0;
+
+        var start_pos = stream.Position;
+
+        while (true)
+        {
+            var byte_index = bit_index / 8;
+
+            stream.Seek(start_pos + byte_index, SeekOrigin.Begin);
+
+            switch (bit_index % 8)
+            {
+                case 0: // Next: 6
+                {
+                    bits = stream.ReadByte() & 0x3F;
+                } break;
+
+                case 2: // Next: 0
+                {
+                    bits = stream.ReadByte() >> 2;
+                } break;
+
+                case 4: // Next: 2
+                {
+                    bits = (stream.ReadByte() >> 4) | ((stream.ReadByte() & 0x3) << 4);
+                } break;
+
+                case 6: // Next: 4
+                {
+                    bits = (stream.ReadByte() >> 6) | ((stream.ReadByte() & 0xF) << 2);
+                } break;
+            }
+
+            bit_index += 6;
+
+            if (bits != 0)
+            {
+                builder.Append(DaveEncoding[bits]);
+            }
+            else
+            {
+                break;
+            }
+        };
+
+        return builder.ToString();
+    }
+
+    public static string ReadDaveString(this Stream stream, string prev_name)
+    {
+        var start_pos = stream.Position;
+
+        var first = stream.ReadByte();
+
+        if ((first & 0x3F) < 0x38)
+        {
+            stream.Seek(start_pos, SeekOrigin.Begin);
+
+            return ReadDaveStringImpl(stream, 0);
+        }
+
+        if (prev_name == null)
+        {
+            throw new Exception("Expected Previous Entry");
+        }
+
+        var second = stream.ReadByte();
+
+        /*
+         * index[0:3] = first[0:3]
+         * index[3:5] = first[6:8]
+         * index[5:8] = second[0:3]
+         */
+
+        var index = (first & 0x7) | ((first & 0xC0) >> 3) | ((second & 0x7) << 5);
+
+        stream.Seek(start_pos, SeekOrigin.Begin);
+
+        var replacement = ReadDaveStringImpl(stream, 12);
+
+        return prev_name.Substring(0, index) + replacement;
+    }
+
     public static string ReadASCII(this Stream stream, int size)
     {
         var buffer = new byte[size];
@@ -240,7 +329,8 @@ namespace Midtown
 
     public class DAVEReader : IFileReader
     {
-        public static uint DAVE_MAGIC = 0x45564144; // DAVE
+        public static uint DAVE_MAGIC_V1 = 0x45564144; // DAVE
+        public static uint DAVE_MAGIC_V2 = 0x65766144; // Dave
 
         public override string Identifier => "Midtown Madness 2 / DAVE";
 
@@ -248,16 +338,36 @@ namespace Midtown
         {
             input.BaseStream.Seek(0, SeekOrigin.Begin);
 
-            return input.ReadUInt32() == DAVE_MAGIC;
+            var magic = input.ReadUInt32();
+
+            return GetDaveVersion(magic) != -1;
+        }
+
+        protected int GetDaveVersion(uint magic)
+        {
+            if (magic == DAVE_MAGIC_V1)
+            {
+                return 1;
+            }
+            else if (magic == DAVE_MAGIC_V2)
+            {
+                return 2;
+            }
+
+            return -1;
         }
 
         public override IEnumerable<IFileEntry> Read(BinaryReader input)
         {
             input.BaseStream.Seek(0, SeekOrigin.Begin);
 
-            if (input.ReadUInt32() != DAVE_MAGIC)
+            var magic = input.ReadUInt32();
+
+            var version = GetDaveVersion(magic);
+
+            if (version == -1)
             {
-                yield break;
+                throw new Exception("Invalid Archive");
             }
 
             var file_count   = input.ReadUInt32();
@@ -266,6 +376,8 @@ namespace Midtown
 
             input.BaseStream.Seek(2048 + names_offset, SeekOrigin.Begin);
             var names_stream = new MemoryStream(input.ReadBytes((int) names_size));
+
+            string prev_name = null;
 
             for (var i = 0; i < file_count; ++i)
             {
@@ -278,7 +390,22 @@ namespace Midtown
                 var compressed_size = input.ReadUInt32();
 
                 names_stream.Seek(name_offset, SeekOrigin.Begin);
-                var name = names_stream.ReadASCII();
+
+                string name;
+                if (version == 1)
+                {
+                    name = names_stream.ReadASCII();
+                }
+                else if (version == 2)
+                {
+                    name = names_stream.ReadDaveString(prev_name);
+
+                    prev_name = name;
+                }
+                else
+                {
+                    throw new Exception("Invalid Version");
+                }
 
                 if (size != compressed_size)
                 {
@@ -575,7 +702,7 @@ namespace MidtownExtractor
             {
                 var extension = GetArgOrReadLine("Extension", args, 1);
 
-                foreach (var file in Directory.GetFiles(path, "*." + extension))
+                foreach (var file in Directory.GetFiles(path, "*." + extension /*, SearchOption.AllDirectories */))
                 {
                     ExtractArchive(file);
                 }
